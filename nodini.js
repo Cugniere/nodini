@@ -1,10 +1,11 @@
 import http from "http"
 import path from "path"
 import fs from "fs"
+import { pipeline } from "stream"
 
 const CONFIG = {
   port: 80,
-  rootDirectory: import.meta.dirname,
+  rootDirectory: fs.realpathSync(import.meta.dirname),
   accessHiddenFiles: false,
   indexFiles: ["index.html", "index.htm"],
   bytesPerUnit: 1024,
@@ -199,6 +200,8 @@ const formatSize = (bytes) => {
   return `${value}&nbsp;${CONFIG.sizeUnits[exp]}`
 }
 
+const encodePath = (filePath) => filePath.split("/").map(encodeURIComponent).join("/")
+
 const getFileInfo = (filePath) => {
   const stats = fs.lstatSync(filePath)
   const fileName = path.basename(filePath)
@@ -207,7 +210,7 @@ const getFileInfo = (filePath) => {
 
   return {
     name: fileName,
-    path: encodeURI(relativePath),
+    path: encodePath(relativePath),
     size: formatSize(stats.size),
     ext: isDirectory ? "[DIR]" : path.extname(filePath).slice(1) || "∅",
     modified: new Date(stats.mtimeMs).toISOString().slice(0, 16).replace("T", " "),
@@ -231,7 +234,7 @@ const renderDirectory = (dirPath) => {
     '<a href="/">Home</a>',
     ...parts.map((folder, i) => {
       const url = "/" + parts.slice(0, i + 1).join("/")
-      return `<a href="${url}">${folder}</a>`
+      return `<a href="${encodePath(url)}">${escapeHTML(folder)}</a>`
     })
   ].join(" / ")
 
@@ -274,7 +277,7 @@ const renderDirectory = (dirPath) => {
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Index of ${relativePath || "/"}</title>
+        <title>Index of ${escapeHTML(relativePath) || "/"}</title>
         <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxIiBoZWlnaHQ9IjEiIGZpbGw9Im5vbmUiPjwvc3ZnPg==">
         <style>${STYLES}</style>
       </head>
@@ -295,34 +298,38 @@ const renderDirectory = (dirPath) => {
   `
 }
 
-const isPathSafe = (requestPath, rootDirectory) => path.resolve(requestPath).startsWith(path.resolve(rootDirectory))
+const isPathSafe = (requestPath, root) => requestPath === root || requestPath.startsWith(root+path.sep)
 const isSensitive = (requestPath) => !CONFIG.accessHiddenFiles && requestPath.split(path.sep).some((part) => part.startsWith("."))
 
 const handleRequest = (req, res) => {
   try {
-    const decodedUrl = decodeURIComponent(req.url)
-    const requestPath = path.resolve(path.join(CONFIG.rootDirectory, decodedUrl))
+    const isAllowed = (requestPath) => isPathSafe(requestPath, CONFIG.rootDirectory) && !isSensitive(requestPath)
+    const decodedUrl = decodeURIComponent(new URL(req.url, "http://x").pathname)
+    const joinedPath = path.resolve(path.join(CONFIG.rootDirectory, decodedUrl))
 
-    if (!isPathSafe(requestPath, CONFIG.rootDirectory) || isSensitive(requestPath)) {
-      return res.writeHead(403, SECURITY_HEADERS).end("Forbidden")
-    } else if (!fs.existsSync(requestPath)) return res.writeHead(404, SECURITY_HEADERS).end("Not Found")
+    if(!isAllowed(joinedPath)) return res.writeHead(403, SECURITY_HEADERS).end("Forbidden")
+    if(!fs.existsSync(joinedPath)) return res.writeHead(404, SECURITY_HEADERS).end("Not Found")
+
+    const requestPath = fs.realpathSync(joinedPath)
+    if(!isAllowed(requestPath)) return res.writeHead(403, SECURITY_HEADERS).end("Forbidden")
 
     const isDirectory = fs.lstatSync(requestPath).isDirectory()
 
     if (isDirectory) {
       if (!decodedUrl.endsWith("/")) {
+        const location = joinedPath.slice(CONFIG.rootDirectory.length).split(path.sep).map(encodeURIComponent).join("/") + "/"
         return res
           .writeHead(301, {
-            Location: `${decodedUrl}/`,
+            Location: location,
             "Content-Type": "text/html",
             ...SECURITY_HEADERS
           })
-          .end(`Redirecting to <a href="${decodedUrl}/">${decodedUrl}/</a>`)
+          .end(`Redirecting to <a href="${location}">${location}</a>`)
       }
 
       for (const indexFile of CONFIG.indexFiles) {
         const indexPath = path.join(requestPath, indexFile)
-        if (fs.existsSync(indexPath) && isPathSafe(indexPath, CONFIG.rootDirectory)) {
+        if (fs.existsSync(indexPath) && isAllowed(fs.realpathSync(indexPath)) && fs.statSync(indexPath).isFile()) {
           return serveFile(indexPath, res)
         }
       }
@@ -354,7 +361,7 @@ const serveFile = (filePath, res) => {
       "Content-Type": `${contentType}; charset=UTF-8`,
       ...SECURITY_HEADERS
     })
-    fs.createReadStream(filePath).pipe(res)
+    pipeline(fs.createReadStream(filePath), res, () => {})
   })
 }
 
