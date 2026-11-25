@@ -24,6 +24,9 @@ const MIME_TYPES = {
   ".js": "application/javascript", ".mjs": "application/javascript",
   ".json": "application/json", ".xml": "application/xml",
   ".webmanifest": "application/manifest+json",
+
+  // Fonts
+  ".woff2": "font/woff2",
   
   // Images
   ".svg": "image/svg+xml", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
